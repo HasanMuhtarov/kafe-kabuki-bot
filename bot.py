@@ -24,6 +24,7 @@ from aiogram.types import (
     Update,
     FSInputFile,
     URLInputFile,
+    LinkPreviewOptions,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -572,14 +573,25 @@ async def send_admin_order(bot_: Bot, order_data: Dict) -> bool:
 
     for chat_id in ADMIN_CHAT_IDS:
         try:
-            await bot_.send_message(chat_id, text_md, parse_mode="MarkdownV2")
+            await bot_.send_message(
+                chat_id,
+                text_md,
+                parse_mode="MarkdownV2",
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+                disable_web_page_preview=True,
+            )
             logger.info("Заказ отправлен в %s", chat_id)
             return True
         except Exception as e:
             last_error = e
             logger.error("MarkdownV2 в %s: %s", chat_id, e)
             try:
-                await bot_.send_message(chat_id, plain)
+                await bot_.send_message(
+                    chat_id,
+                    plain,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True),
+                    disable_web_page_preview=True,
+                )
                 logger.info("Заказ отправлен текстом в %s", chat_id)
                 return True
             except Exception as e2:
