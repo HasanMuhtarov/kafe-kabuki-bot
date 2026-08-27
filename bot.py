@@ -48,10 +48,18 @@ def load_env_file(path: Path) -> None:
 
 load_env_file(BASE_DIR / ".env")
 
-BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
+BOT_TOKEN = (
+    os.getenv("BOT_TOKEN")
+    or os.getenv("TELEGRAM_TOKEN")
+    or os.getenv("TELEGRAM_BOT_TOKEN")
+    or os.getenv("БОТ_TOKEN")
+    or os.getenv("БОТ_ТОКЕН")
+    or ""
+).strip().strip('"').strip("'").replace(" ", "")
 GROUP_ID_RAW = (
     os.getenv("GROUP_ID")
     or os.getenv("ADMIN_GROUP_ID")
+    or os.getenv("ИДЕНТИФИКАТОР_ГРУППЫ")
     or "-1003851301612"
 ).strip()
 try:
@@ -61,17 +69,11 @@ except ValueError:
 
 ADMIN_CHAT_IDS = list(dict.fromkeys([ADMIN_GROUP_ID, -1003851301612, -3851301612]))
 
-if (not BOT_TOKEN) or (" " in BOT_TOKEN) or (":" not in BOT_TOKEN) or BOT_TOKEN.lower() in {
-    "мойтокен",
-    "your_token",
-    "token",
-    "paste_bot_token_here",
-}:
+logger.info("ENV has BOT_TOKEN=%s GROUP_ID=%s", bool(os.getenv("BOT_TOKEN")), bool(os.getenv("GROUP_ID")))
+if (not BOT_TOKEN) or (":" not in BOT_TOKEN):
     raise SystemExit(
-        "Не задан валидный BOT_TOKEN.\n"
-        "Положите файл .env рядом с bot.py:\n"
-        "BOT_TOKEN=1234567890:AAE...\n"
-        "GROUP_ID=-1003851301612"
+        "Railway не передал BOT_TOKEN в процесс. "
+        "Variables → BOT_TOKEN и GROUP_ID на ЭТОМ сервисе → меню ⋮ → Redeploy."
     )
 
 bot = Bot(token=BOT_TOKEN)
@@ -562,26 +564,15 @@ async def send_admin_order(bot_: Bot, order_data: Dict) -> bool:
     lon = order_data.get("lon")
     if lat is not None and lon is not None:
         navi = f"https://yandex.ru/navi/?whatshere[point]={lon},{lat}&whatshere[zoom]=18"
-        ymaps = f"https://yandex.ru/maps/?pt={lon},{lat}&z=18"
         lines.append(f"🧭 Яндекс Навигатор: {escape_md(navi)}")
-        lines.append(f"🗺 Яндекс Карты: {escape_md(ymaps)}")
 
     text_md = "\n".join(lines)
     plain = text_md.replace("\\", "").replace("*", "").replace("_", "")
     last_error = None
 
-    async def send_pin(chat_id: int):
-        if lat is None or lon is None:
-            return
-        try:
-            await bot_.send_location(chat_id, latitude=float(lat), longitude=float(lon))
-        except Exception as e:
-            logger.error("Не удалось отправить точку на карте в %s: %s", chat_id, e)
-
     for chat_id in ADMIN_CHAT_IDS:
         try:
             await bot_.send_message(chat_id, text_md, parse_mode="MarkdownV2")
-            await send_pin(chat_id)
             logger.info("Заказ отправлен в %s", chat_id)
             return True
         except Exception as e:
@@ -589,7 +580,6 @@ async def send_admin_order(bot_: Bot, order_data: Dict) -> bool:
             logger.error("MarkdownV2 в %s: %s", chat_id, e)
             try:
                 await bot_.send_message(chat_id, plain)
-                await send_pin(chat_id)
                 logger.info("Заказ отправлен текстом в %s", chat_id)
                 return True
             except Exception as e2:
