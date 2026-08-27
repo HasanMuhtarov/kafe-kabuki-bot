@@ -541,7 +541,7 @@ async def send_admin_order(bot_: Bot, order_data: Dict) -> bool:
         "",
         f"👤 {escape_md(order_data['user_name'])}",
         f"📱 {escape_md(order_data['phone'])}",
-        f"📍 {escape_md(order_data['address'])}",
+        f"📍 {escape_md(order_data.get('address') or '')}",
         "",
         f"🛒 {escape_md(t(0, 'cart_total').format(format_price(total)))}",
         "",
@@ -558,12 +558,30 @@ async def send_admin_order(bot_: Bot, order_data: Dict) -> bool:
     lines.append("")
     lines.append(f"💬 {escape_md(order_data.get('comment') or '---')}")
     lines.append(f"💳 {escape_md(order_data['payment_method'])}")
+    lat = order_data.get("lat")
+    lon = order_data.get("lon")
+    if lat is not None and lon is not None:
+        navi = f"https://yandex.ru/navi/?whatshere[point]={lon},{lat}&whatshere[zoom]=18"
+        ymaps = f"https://yandex.ru/maps/?pt={lon},{lat}&z=18"
+        lines.append(f"🧭 Яндекс Навигатор: {escape_md(navi)}")
+        lines.append(f"🗺 Яндекс Карты: {escape_md(ymaps)}")
+
     text_md = "\n".join(lines)
     plain = text_md.replace("\\", "").replace("*", "").replace("_", "")
     last_error = None
+
+    async def send_pin(chat_id: int):
+        if lat is None or lon is None:
+            return
+        try:
+            await bot_.send_location(chat_id, latitude=float(lat), longitude=float(lon))
+        except Exception as e:
+            logger.error("Не удалось отправить точку на карте в %s: %s", chat_id, e)
+
     for chat_id in ADMIN_CHAT_IDS:
         try:
             await bot_.send_message(chat_id, text_md, parse_mode="MarkdownV2")
+            await send_pin(chat_id)
             logger.info("Заказ отправлен в %s", chat_id)
             return True
         except Exception as e:
@@ -571,6 +589,7 @@ async def send_admin_order(bot_: Bot, order_data: Dict) -> bool:
             logger.error("MarkdownV2 в %s: %s", chat_id, e)
             try:
                 await bot_.send_message(chat_id, plain)
+                await send_pin(chat_id)
                 logger.info("Заказ отправлен текстом в %s", chat_id)
                 return True
             except Exception as e2:
@@ -856,7 +875,7 @@ async def choose_address_type(callback: CallbackQuery, state: FSMContext):
     addr_type = callback.data.split("_", 2)[2]
     await state.update_data(address_type=addr_type)
     if addr_type == "pickup":
-        await state.update_data(address=t(uid, "order_pickup"))
+        await state.update_data(address=t(uid, "order_pickup"), lat=None, lon=None)
         await state.set_state(OrderState.comment)
         await callback.message.edit_text(t(uid, "choose_order_comment"), reply_markup=get_comment_keyboard(uid))
     elif addr_type == "text":
@@ -871,7 +890,7 @@ async def choose_address_type(callback: CallbackQuery, state: FSMContext):
 @dp.message(OrderState.address_text)
 async def process_address_text(message: Message, state: FSMContext):
     uid = message.from_user.id
-    await state.update_data(address=message.text)
+    await state.update_data(address=message.text, lat=None, lon=None)
     await state.set_state(OrderState.comment)
     await message.answer(t(uid, "address_saved"))
     await message.answer(t(uid, "choose_order_comment"), reply_markup=get_comment_keyboard(uid))
@@ -881,8 +900,10 @@ async def process_address_text(message: Message, state: FSMContext):
 async def process_location(message: Message, state: FSMContext):
     uid = message.from_user.id
     loc = message.location
-    address = f"🗺️ Геолокация\n🌐 {loc.latitude:.6f}, {loc.longitude:.6f}"
-    await state.update_data(address=address)
+    lat = float(loc.latitude)
+    lon = float(loc.longitude)
+    address = f"Геолокация: {lat:.6f}, {lon:.6f}"
+    await state.update_data(address=address, lat=lat, lon=lon)
     await state.set_state(OrderState.comment)
     await message.answer(t(uid, "address_saved"), reply_markup=ReplyKeyboardRemove())
     await message.answer(t(uid, "choose_order_comment"), reply_markup=get_comment_keyboard(uid))
@@ -948,6 +969,8 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext):
         "user_name": callback.from_user.full_name,
         "phone": data["phone"],
         "address": data["address"],
+        "lat": data.get("lat"),
+        "lon": data.get("lon"),
         "payment_method": data["payment_method"],
         "items": [dict(item) for item in cart],
         "comment": data.get("comment", ""),
