@@ -596,12 +596,28 @@ async def delivery_for_user(uid: int, data: Optional[Dict] = None) -> Dict[str, 
     )
 
 
+def merge_same_dishes(items: List[Dict]) -> List[Dict]:
+    merged: List[Dict] = []
+    index: Dict[Any, int] = {}
+    for item in items:
+        key = item.get("item_id") or (item.get("name_ru") or item.get("name"), item.get("price"))
+        if key in index:
+            dest = merged[index[key]]
+            dest["quantity"] = dest.get("quantity", 1) + item.get("quantity", 1)
+            comments = [c for c in (dest.get("comment"), item.get("comment")) if c]
+            dest["comment"] = "; ".join(comments)
+        else:
+            index[key] = len(merged)
+            merged.append(dict(item))
+    return merged
+
+
 async def save_user_cart(uid: int, cart: List[Dict]):
-    USER_CARTS[uid] = cart
+    USER_CARTS[uid] = merge_same_dishes(cart)
 
 
 async def get_user_cart(uid: int) -> List[Dict]:
-    return USER_CARTS.get(uid, [])
+    return merge_same_dishes(USER_CARTS.get(uid, []))
 
 
 async def add_to_cart(uid: int, item_id: str, quantity: int = 1):
@@ -695,12 +711,18 @@ async def send_admin_order(bot_: Bot, order_data: Dict) -> bool:
         "",
         escape_md("📋 Товары:"),
     ]
-    for item in order_data["items"]:
-        item_total = item["quantity"] * item["price"]
+    for item in merge_same_dishes(order_data["items"]):
+        qty = item.get("quantity", 1)
+        item_total = qty * item["price"]
         title = item.get("name_ru") or item.get("name") or item.get("item_id")
-        lines.append(
-            f"• {escape_md(title)} x{escape_md(item['quantity'])} \\- {escape_md(format_price(item_total))}"
-        )
+        if qty > 1:
+            lines.append(
+                f"• {escape_md(title)} \\- {escape_md(format_price(item['price']))} × {escape_md(qty)} \\= {escape_md(format_price(item_total))}"
+            )
+        else:
+            lines.append(
+                f"• {escape_md(title)} \\- {escape_md(format_price(item_total))}"
+            )
         if item.get("comment"):
             lines.append(f"  _{escape_md(item['comment'])}_")
     lines.append("")
