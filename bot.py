@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import re
 import uuid
@@ -7,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import aiohttp
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -70,6 +72,31 @@ except ValueError:
 
 ADMIN_CHAT_IDS = list(dict.fromkeys([ADMIN_GROUP_ID, -1003851301612, -3851301612]))
 
+# Зона бесплатной/фиксированной доставки: центр кафе + радиус в км.
+# Подставьте точные координаты кафе, если нужно сдвинуть зону.
+# 39°41'52.8"N 67°06'25.2"E — точка кафе / центр Жомбоя
+DELIVERY_CENTER_LAT = float(os.getenv("DELIVERY_CENTER_LAT") or "39.698000")
+DELIVERY_CENTER_LON = float(os.getenv("DELIVERY_CENTER_LON") or "67.107000")
+DELIVERY_RADIUS_KM = float(os.getenv("DELIVERY_RADIUS_KM") or "5")
+FREE_DELIVERY_FROM = 80000
+DELIVERY_FEE_INSIDE = 10000
+JOMBOY_MARKERS = (
+    "жомбой",
+    "жомбои",
+    "жонбой",
+    "жомбае",
+    "жомбаю",
+    "жомбая",
+    "jomboy",
+    "jombay",
+    "jambay",
+    "jomboyi",
+    "жомбойский",
+    "жомбой туман",
+    "жомбой тумани",
+    "jomboy tuman",
+)
+
 logger.info("ENV has BOT_TOKEN=%s GROUP_ID=%s", bool(os.getenv("BOT_TOKEN")), bool(os.getenv("GROUP_ID")))
 if (not BOT_TOKEN) or (":" not in BOT_TOKEN):
     raise SystemExit(
@@ -122,7 +149,7 @@ LANGS = {
         "added": "Добавлено в корзину",
         "cart_comment": "✏️ Комментарий к блюду",
         "order_phone": "📱 Введите номер телефона",
-        "order_address": "📍 Выберите способ указания адреса",
+        "order_address": "📍 Для доставки отправьте геолокацию",
         "order_address_text": "📝 Текстовый адрес",
         "order_address_geo": "📍 Отправить геолокацию",
         "order_pickup": "📦 Самовывоз",
@@ -153,6 +180,13 @@ LANGS = {
         "need_payment": "❌ Способ оплаты не выбран",
         "send_failed": "❌ Ошибка при отправке заказа. Попробуйте еще раз.",
         "admin_not_configured": "❌ ADMIN_GROUP_ID не задан. Заказ не отправлен администраторам.",
+        "delivery_free": "🚚 Жомбой: доставка бесплатно (заказ от 80 000 сум)",
+        "delivery_inside_paid": "🚚 Жомбой: доставка 10 000 сум (заказ меньше 80 000 сум)",
+        "delivery_outside": "🚚 Адрес не в Жомбое.\n⚠️ Итоговая сумма может измениться: стоимость доставки уточнит менеджер.",
+        "delivery_unknown": "🚚 Не удалось понять, Жомбой это или нет.\n⚠️ Итоговая сумма может измениться: стоимость доставки уточнит менеджер.",
+        "delivery_pickup": "📦 Самовывоз: доставка не начисляется",
+        "delivery_line": "🚚 Доставка: {}",
+        "grand_total": "💳 К оплате: {} сум",
     },
     "uz": {
         "menu": "🍣 Menyu",
@@ -168,7 +202,7 @@ LANGS = {
         "added": "Savatga qoʻshildi",
         "cart_comment": "✏️ Taom uchun izoh",
         "order_phone": "📱 Telefon raqamini kiriting",
-        "order_address": "📍 Yetkazib berish usulini tanlang",
+        "order_address": "📍 Yetkazib berish uchun geolokatsiya yuboring",
         "order_address_text": "📝 Matnli manzil",
         "order_address_geo": "📍 Geolocation yuborish",
         "order_pickup": "📦 Olib ketish",
@@ -199,6 +233,13 @@ LANGS = {
         "need_payment": "❌ Toʻlov usuli tanlanmagan",
         "send_failed": "❌ Buyurtmani yuborishda xatolik. Qayta urinib koʻring.",
         "admin_not_configured": "❌ ADMIN_GROUP_ID sozlanmagan.",
+        "delivery_free": "🚚 Jomboy: yetkazib berish bepul (80 000 soʻmdan)",
+        "delivery_inside_paid": "🚚 Jomboy: yetkazib berish 10 000 soʻm (80 000 soʻmgacha)",
+        "delivery_outside": "🚚 Manzil Jomboyda emas.\n⚠️ Yakuniy summa o‘zgarishi mumkin: yetkazib berish narxini menejer aytadi.",
+        "delivery_unknown": "🚚 Jomboy yoki yo‘qligini aniqlab bo‘lmadi.\n⚠️ Yakuniy summa o‘zgarishi mumkin: yetkazib berish narxini menejer aytadi.",
+        "delivery_pickup": "📦 Olib ketish: yetkazib berish qo‘shilmaydi",
+        "delivery_line": "🚚 Yetkazib berish: {}",
+        "grand_total": "💳 To‘lov: {} soʻm",
     },
 }
 
@@ -389,7 +430,6 @@ def get_back_keyboard(uid: int, target: str = "menu") -> InlineKeyboardMarkup:
 def get_address_keyboard(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t(uid, "order_address_text"), callback_data="addr_type_text")],
             [InlineKeyboardButton(text=t(uid, "order_address_geo"), callback_data="addr_type_geo")],
             [InlineKeyboardButton(text=t(uid, "order_pickup"), callback_data="addr_type_pickup")],
             [InlineKeyboardButton(text=t(uid, "back"), callback_data="back_to_cart")],
@@ -456,6 +496,104 @@ def clean_phone(phone: str) -> Optional[str]:
 
 def generate_line_id() -> str:
     return str(uuid.uuid4())[:8]
+
+
+def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def in_delivery_zone(lat: float, lon: float) -> bool:
+    return distance_km(lat, lon, DELIVERY_CENTER_LAT, DELIVERY_CENTER_LON) <= DELIVERY_RADIUS_KM
+
+
+async def driving_distance_km(lat: float, lon: float) -> Optional[float]:
+    """Длина маршрута по дорогам от кафе до клиента (км), не по прямой."""
+    url = (
+        "https://router.project-osrm.org/route/v1/driving/"
+        f"{DELIVERY_CENTER_LON},{DELIVERY_CENTER_LAT};{lon},{lat}"
+        "?overview=false&alternatives=false"
+    )
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    logger.warning("OSRM status %s", resp.status)
+                    return None
+                data = await resp.json()
+        if data.get("code") != "Ok" or not data.get("routes"):
+            return None
+        return float(data["routes"][0]["distance"]) / 1000.0
+    except Exception as e:
+        logger.warning("Не удалось посчитать маршрут: %s", e)
+        return None
+
+
+def normalize_addr(text: str) -> str:
+    text = (text or "").lower().replace("ё", "е")
+    return " ".join(text.split())
+
+
+def address_says_jomboy(address: str) -> bool:
+    raw = normalize_addr(address)
+    return any(marker in raw for marker in JOMBOY_MARKERS)
+
+
+async def is_jomboy(address_type: Optional[str], address: Optional[str], lat, lon) -> Optional[bool]:
+    if address_type == "pickup":
+        return None
+    if lat is not None and lon is not None:
+        road_km = await driving_distance_km(float(lat), float(lon))
+        if road_km is not None:
+            logger.info("Маршрут до клиента: %.2f км (лимит %.1f)", road_km, DELIVERY_RADIUS_KM)
+            return road_km <= DELIVERY_RADIUS_KM
+        return in_delivery_zone(float(lat), float(lon))
+    if address_says_jomboy(address or ""):
+        return True
+    if address and address_type == "text":
+        return False
+    return None
+
+
+def delivery_by_zone(uid: int, items_total: int, inside: Optional[bool]) -> Dict[str, Any]:
+    if inside is True:
+        if items_total >= FREE_DELIVERY_FROM:
+            return {"fee": 0, "zone": "jomboy", "text": t(uid, "delivery_free"), "payable": items_total}
+        return {
+            "fee": DELIVERY_FEE_INSIDE,
+            "zone": "jomboy",
+            "text": t(uid, "delivery_inside_paid"),
+            "payable": items_total + DELIVERY_FEE_INSIDE,
+        }
+    if inside is False:
+        return {"fee": None, "zone": "outside", "text": t(uid, "delivery_outside"), "payable": items_total}
+    return {"fee": None, "zone": "unknown", "text": t(uid, "delivery_unknown"), "payable": items_total}
+
+
+async def calc_delivery(uid: int, items_total: int, address_type: Optional[str], lat, lon, address: Optional[str] = None) -> Dict[str, Any]:
+    if address_type == "pickup":
+        return {"fee": 0, "zone": "pickup", "text": t(uid, "delivery_pickup"), "payable": items_total}
+    inside = await is_jomboy(address_type, address, lat, lon)
+    return delivery_by_zone(uid, items_total, inside)
+
+
+async def delivery_for_user(uid: int, data: Optional[Dict] = None) -> Dict[str, Any]:
+    cart = await get_user_cart(uid)
+    items_total = sum(i["quantity"] * i["price"] for i in cart)
+    data = data or {}
+    return await calc_delivery(
+        uid,
+        items_total,
+        data.get("address_type"),
+        data.get("lat"),
+        data.get("lon"),
+        data.get("address"),
+    )
 
 
 async def save_user_cart(uid: int, cart: List[Dict]):
@@ -547,6 +685,13 @@ async def send_admin_order(bot_: Bot, order_data: Dict) -> bool:
         f"📍 {escape_md(order_data.get('address') or '')}",
         "",
         f"🛒 {escape_md(t(0, 'cart_total').format(format_price(total)))}",
+    ]
+    delivery = order_data.get("delivery") or {}
+    if delivery.get("text"):
+        lines.append(escape_md(delivery["text"]))
+    if delivery.get("fee") is not None:
+        lines.append(escape_md(t(0, "grand_total").format(format_price(delivery.get("payable", total)))))
+    lines += [
         "",
         escape_md("📋 Товары:"),
     ]
@@ -879,23 +1024,15 @@ async def choose_address_type(callback: CallbackQuery, state: FSMContext):
     if addr_type == "pickup":
         await state.update_data(address=t(uid, "order_pickup"), lat=None, lon=None)
         await state.set_state(OrderState.comment)
-        await callback.message.edit_text(t(uid, "choose_order_comment"), reply_markup=get_comment_keyboard(uid))
-    elif addr_type == "text":
-        await state.set_state(OrderState.address_text)
-        await callback.message.edit_text(t(uid, "order_address_text_input"), reply_markup=get_back_keyboard(uid, "address"))
+        info = await delivery_for_user(uid, await state.get_data())
+        await callback.message.edit_text(
+            f"{t(uid, 'address_saved')}\n\n{info['text']}\n\n{t(uid, 'choose_order_comment')}",
+            reply_markup=get_comment_keyboard(uid),
+        )
     elif addr_type == "geo":
         await state.set_state(OrderState.address_geo)
         await callback.message.answer(t(uid, "order_address_geo"), reply_markup=get_geo_keyboard(uid))
     await callback.answer()
-
-
-@dp.message(OrderState.address_text)
-async def process_address_text(message: Message, state: FSMContext):
-    uid = message.from_user.id
-    await state.update_data(address=message.text, lat=None, lon=None)
-    await state.set_state(OrderState.comment)
-    await message.answer(t(uid, "address_saved"))
-    await message.answer(t(uid, "choose_order_comment"), reply_markup=get_comment_keyboard(uid))
 
 
 @dp.message(OrderState.address_geo, F.location)
@@ -907,7 +1044,11 @@ async def process_location(message: Message, state: FSMContext):
     address = f"Геолокация: {lat:.6f}, {lon:.6f}"
     await state.update_data(address=address, lat=lat, lon=lon)
     await state.set_state(OrderState.comment)
-    await message.answer(t(uid, "address_saved"), reply_markup=ReplyKeyboardRemove())
+    info = await delivery_for_user(uid, await state.get_data())
+    await message.answer(
+        f"{t(uid, 'address_saved')}\n\n{info['text']}",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     await message.answer(t(uid, "choose_order_comment"), reply_markup=get_comment_keyboard(uid))
 
 
@@ -934,13 +1075,18 @@ async def choose_payment(callback: CallbackQuery, state: FSMContext):
     payment_method_key = callback.data.split("_", 1)[1]
     await state.update_data(payment_method=t(uid, f"payment_{payment_method_key}"))
     await state.set_state(OrderState.confirm)
+    data = await state.get_data()
+    info = await delivery_for_user(uid, data)
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t(uid, "confirm_order"), callback_data="confirm_order")],
             [InlineKeyboardButton(text=t(uid, "back"), callback_data="back_to_payment")],
         ]
     )
-    await callback.message.edit_text(t(uid, "confirm_order"), reply_markup=kb)
+    extra = info["text"]
+    if info.get("fee") is not None:
+        extra += f"\n{t(uid, 'grand_total').format(format_price(info['payable']))}"
+    await callback.message.edit_text(f"{t(uid, 'confirm_order')}\n\n{extra}", reply_markup=kb)
     await callback.answer()
 
 
@@ -964,11 +1110,13 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext):
         await callback.answer(t(uid, "need_payment"), show_alert=True)
         return
 
+    delivery = await delivery_for_user(uid, data)
     order_id = len(USER_ORDERS.get(uid, [])) + 1
     order_data = {
         "id": order_id,
         "user_id": uid,
         "user_name": callback.from_user.full_name,
+        "delivery": delivery,
         "phone": data["phone"],
         "address": data["address"],
         "lat": data.get("lat"),
@@ -983,6 +1131,9 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext):
         await clear_user_cart(uid)
         USER_ORDERS.setdefault(uid, []).append(order_data)
         confirm_text = t(uid, "order_confirmed").format(order_id=order_id)
+        confirm_text += f"\n\n{delivery['text']}"
+        if delivery.get("fee") is not None:
+            confirm_text += f"\n{t(uid, 'grand_total').format(format_price(delivery['payable']))}"
         try:
             await callback.message.edit_text(confirm_text)
         except Exception:
